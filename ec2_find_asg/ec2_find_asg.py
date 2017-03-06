@@ -44,12 +44,13 @@ import sys
 
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
+from ansible.module_utils.six import iteritems
 
 try:
-    import boto.ec2.autoscale
+    import botocore
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    pass  # will be detected by imported HAS_BOTO3
+
 
 ASG_ATTRIBUTES = ('availability_zones', 'default_cooldown', 'desired_capacity',
                   'health_check_period', 'health_check_type',
@@ -121,12 +122,11 @@ def match(as_groups, search_tags):
     """
     matching_as_groups = {}
     matching_as_groups_list = []
-
-    for as_group in as_groups:
-        as_group_tags = dict((t.key, t.value) for t in as_group.tags)
+    for as_group in as_groups["AutoScalingGroups"]:
+        as_group_tags = dict((t["Key"], t["Value"]) for t in as_group["Tags"])
         tags_intersection = dict(set.intersection(*(set(d.iteritems()) for d in [as_group_tags, search_tags])))
         if tags_intersection == search_tags:
-            matching_as_groups_list.append(get_properties(as_group))
+            matching_as_groups_list.append(as_group)
 
     matching_as_groups.update(
         as_groups=matching_as_groups_list
@@ -149,7 +149,7 @@ def find(connection, search_tags):
     :rtype: dict
     :return: A dictionary of matching Auto Scaling Groups.
     """
-    as_groups = connection.get_all_groups()
+    as_groups = connection.describe_auto_scaling_groups()
 
     return match(as_groups, search_tags)
 
@@ -168,16 +168,24 @@ def main():
         supports_check_mode=True
     )
 
-    region, ec2_url, aws_connect_params = get_aws_connection_info(module)
+    if not HAS_BOTO3:
+        module.fail_json(msg='boto3 required for this module')
+
+    region, ec2_url, aws_connect_params = get_aws_connection_info(module, boto3=True)
     try:
-        connection = connect_to_aws(boto.ec2.autoscale, region, **aws_connect_params)
+        connection = boto3_conn(module,
+                                conn_type='client',
+                                resource='autoscaling',
+                                region=region,
+                                endpoint=ec2_url,
+                                **aws_connect_params)
         if not connection:
             module.fail_json(msg="failed to connect to AWS for the given region: %s" % str(region))
-    except boto.exception.NoAuthHandlerFound, error:
-        module.fail_json(msg=str(error))
+    except botocore.exceptions.NoCredentialsError as e:
+        module.fail_json(msg=str(e))
 
     search_tags = module.params.get('tags')
-    module.exit_json(changed=False, **find(connection, search_tags))
+    module.exit_json(**find(connection, search_tags))
 
 if __name__ == "__main__":
     main()
